@@ -146,10 +146,7 @@ fn mark_ancestor_grids(
     parents: &Query<&ChildOf>,
 ) {
     let mut ancestor = start;
-    loop {
-        let Ok(mut dirty) = dirty_ticks.get_mut(ancestor) else {
-            break;
-        };
+    while let Ok(mut dirty) = dirty_ticks.get_mut(ancestor) {
         // bypass_change_detection to avoid spurious Changed<GridDirtyTick> noise
         let d = dirty.bypass_change_detection();
         // Early exit: if already marked this tick, all ancestors were marked too
@@ -375,6 +372,9 @@ mod tests {
 
         let grid_entity = app.world_mut().spawn(BigSpaceRootBundle::default()).id();
 
+        // Pause virtual time so FixedUpdate can't tick early under load.
+        app.world_mut().resource_mut::<Time<Virtual>>().pause();
+
         // Spawn BEFORE any update — this is the first-frame scenario.
         let entity = app
             .world_mut()
@@ -386,23 +386,22 @@ mod tests {
             .set_parent_in_place(grid_entity)
             .id();
 
-        // Frame 0: clock init. is_added() true → no init. FixedUpdate has zero
-        // delta, so it won't tick, but gating resource exists at false regardless.
+        // Frame 0: clock init. is_added() true → no init.
         app.update();
         assert!(
             app.world().get::<StationaryInitialized>(entity).is_none(),
             "Frame 0: should not init (is_added)"
         );
 
-        // Frame 1: near-zero delta, FixedUpdate likely doesn't tick.
-        // is_added() is now false, but FixedUpdateRan is false → gated.
+        // Frame 1: is_added() is now false, but FixedUpdateRan is false → gated.
         app.update();
         assert!(
             app.world().get::<StationaryInitialized>(entity).is_none(),
             "Frame 1: should not init (FixedUpdate hasn't ticked yet)"
         );
 
-        // Sleep so FixedUpdate ticks. Now both conditions are met.
+        // Resume virtual time and sleep so FixedUpdate ticks.
+        app.world_mut().resource_mut::<Time<Virtual>>().unpause();
         thread::sleep(core::time::Duration::from_millis(20));
         app.update();
         assert!(

@@ -430,7 +430,7 @@
         0.0,
         1.0
       ],
-      "name": "GLTF_SceneRootNode"
+      "name": "GLTF_WorldAssetRootNode"
     },
     {
       "children": [
