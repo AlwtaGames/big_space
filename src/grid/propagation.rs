@@ -1,7 +1,7 @@
 //! Logic for propagating transforms through the hierarchy of grids.
 
 use crate::{prelude::*, stationary::GridDirtyTick};
-use bevy_ecs::{prelude::*, system::SystemChangeTick};
+use bevy_ecs::{change_detection::Mut, prelude::*, system::SystemChangeTick};
 #[cfg(feature = "std")]
 use bevy_log::tracing::Instrument;
 use bevy_reflect::Reflect;
@@ -57,7 +57,7 @@ impl Grid {
                 Option<&Stationary>,
                 Option<&StationaryInitialized>,
             ),
-            With<CellCoord>,
+            (With<CellCoord>, Without<GridLocalOnly>),
         >,
     ) {
         let start = bevy_platform::time::Instant::now();
@@ -81,19 +81,13 @@ impl Grid {
                     return;
                 }
 
-                // Recompute GT when:
-                // - The grid's local origin moved (FO changed cells), forcing all entities to
-                //   update even if they haven't moved themselves, OR
-                // - The entity's own transform/cell/parent changed, OR
-                // - The entity is stationary but hasn't had its initial GT computed yet.
-                if !grid.local_floating_origin().is_local_origin_unchanged()
-                    || (transform.is_changed() && !is_stationary)
-                    || cell.is_changed()
-                    || parent_rel.is_changed()
-                    || (is_stationary && !is_computed)
-                {
-                    *gt = grid.global_transform(&cell, &transform);
-                }
+                Self::update_global_transform(
+                    grid,
+                    (&cell, &transform, &parent_rel),
+                    &mut gt,
+                    is_stationary,
+                    is_computed,
+                );
             },
         );
 
@@ -102,12 +96,35 @@ impl Grid {
         }
     }
 
+    /// Recompute an entity's [`GlobalTransform`] when the grid's local origin moved (every
+    /// entity's GT depends on it), when the entity's own transform, cell or parent changed, or
+    /// when it is stationary and has not had its initial GT computed yet.
+    #[inline]
+    fn update_global_transform(
+        grid: &Grid,
+        (cell, transform, parent): (&Ref<CellCoord>, &Ref<Transform>, &Ref<ChildOf>),
+        gt: &mut Mut<GlobalTransform>,
+        is_stationary: bool,
+        is_computed: bool,
+    ) {
+        if !grid.local_floating_origin().is_local_origin_unchanged()
+            || (transform.is_changed() && !is_stationary)
+            || cell.is_changed()
+            || parent.is_changed()
+            || (is_stationary && !is_computed)
+        {
+            **gt = grid.global_transform(cell, transform);
+        }
+    }
+
     /// Update the [`GlobalTransform`] of all entities with a [`CellCoord`], using a
     /// producer-consumer architecture with a [`BufferedChannel`].
     ///
-    /// Producer tasks split each dirty [`Grid`]'s children into chunks and send
+    /// Producer tasks split each dirty [`Grid`]'s [`PropagatedChildren`] into chunks and send
     /// non-stationary entities through a buffered channel. Consumer workers pull batches
-    /// concurrently and update [`GlobalTransform`] via [`Query::get_unchecked`].
+    /// concurrently and update [`GlobalTransform`] via [`Query::get_unchecked`]. Entities marked
+    /// [`GridLocalOnly`] are never listed, so they cost nothing here. When the dirty grids list no
+    /// more than one channel chunk of entities, the work runs on the calling thread.
     ///
     /// This is the default high-precision propagation system on `std` targets. The flat
     /// [`Self::propagate_high_precision`] variant is used on `no_std`.
@@ -123,8 +140,8 @@ impl Grid {
     pub fn propagate_high_precision_channeled(
         system_ticks: SystemChangeTick,
         mut stats: Option<ResMut<crate::timing::PropagationStats>>,
-        grids: Query<(Entity, &Grid, Option<&GridDirtyTick>, Option<&Children>)>,
-        entities: Query<
+        grids: Query<(Entity, &Grid, Option<&GridDirtyTick>, &PropagatedChildren)>,
+        mut entities: Query<
             (
                 Ref<CellCoord>,
                 Ref<Transform>,
@@ -133,7 +150,7 @@ impl Grid {
                 Has<Stationary>,
                 Has<StationaryInitialized>,
             ),
-            With<CellCoord>,
+            (With<CellCoord>, Without<GridLocalOnly>),
         >,
         // Lightweight filter used by producers to skip sleeping stationary entities before
         // sending them through the channel. The `fo_unchanged` guard on the producer side
@@ -144,6 +161,46 @@ impl Grid {
         mut channel: Local<crate::buffered_channel::BufferedChannel<Entity>>,
     ) {
         let start = bevy_platform::time::Instant::now();
+        let needs_visit = |grid: &Grid, dirty_tick: Option<&GridDirtyTick>| {
+            let fo_unchanged = grid.local_floating_origin().is_local_origin_unchanged();
+            let subtree_clean = dirty_tick.is_some_and(|dt| !dt.is_dirty(system_ticks));
+            !(fo_unchanged && subtree_clean)
+        };
+        let listed: usize = grids
+            .iter()
+            .filter(|(_, grid, dirty_tick, _)| needs_visit(grid, *dirty_tick))
+            .map(|(_, _, _, list)| list.entities().len())
+            .sum();
+        if listed <= Self::INLINE_PROPAGATION_MAX {
+            for (_, grid, dirty_tick, list) in &grids {
+                if !needs_visit(grid, dirty_tick) {
+                    continue;
+                }
+                let fo_unchanged = grid.local_floating_origin().is_local_origin_unchanged();
+                for &child in list.entities() {
+                    if fo_unchanged && stationary_filter.contains(child) {
+                        continue;
+                    }
+                    let Ok((cell, transform, parent, mut gt, is_stationary, is_computed)) =
+                        entities.get_mut(child)
+                    else {
+                        continue;
+                    };
+                    Self::update_global_transform(
+                        grid,
+                        (&cell, &transform, &parent),
+                        &mut gt,
+                        is_stationary,
+                        is_computed,
+                    );
+                }
+            }
+            if let Some(stats) = stats.as_mut() {
+                stats.high_precision_propagation += start.elapsed();
+            }
+            return;
+        }
+
         let task_pool = bevy_tasks::ComputeTaskPool::get();
         let shared_entities = &entities;
         let shared_grids = &grids;
@@ -184,14 +241,13 @@ impl Grid {
                                     continue;
                                 };
 
-                                if !grid.local_floating_origin().is_local_origin_unchanged()
-                                    || (transform.is_changed() && !is_stationary)
-                                    || cell.is_changed()
-                                    || parent.is_changed()
-                                    || (is_stationary && !is_computed)
-                                {
-                                    *gt = grid.global_transform(&cell, &transform);
-                                }
+                                Self::update_global_transform(
+                                    grid,
+                                    (&cell, &transform, &parent),
+                                    &mut gt,
+                                    is_stationary,
+                                    is_computed,
+                                );
                             }
                         }
                     }
@@ -208,17 +264,16 @@ impl Grid {
             let mut large_grids = bevy_utils::Parallel::<Vec<(Entity, bool)>>::default();
             grids.par_iter().for_each_init(
                 || tx.clone(),
-                |sender, (grid_entity, grid, dirty_tick, children)| {
-                    let fo_unchanged = grid.local_floating_origin().is_local_origin_unchanged();
-                    let subtree_clean = dirty_tick.is_some_and(|dt| !dt.is_dirty(system_ticks));
-                    if fo_unchanged && subtree_clean {
+                |sender, (grid_entity, grid, dirty_tick, list)| {
+                    if !needs_visit(grid, dirty_tick) {
                         return;
                     }
-                    let Some(children) = children else { return };
+                    let fo_unchanged = grid.local_floating_origin().is_local_origin_unchanged();
+                    let children = list.entities();
 
                     if children.len() < min_chunk {
                         // Small grid - send directly from this par_iter thread.
-                        for child in children.iter() {
+                        for &child in children {
                             if fo_unchanged && shared_filter.contains(child) {
                                 continue;
                             }
@@ -235,9 +290,10 @@ impl Grid {
 
             // Spawn chunked producer tasks for large grids.
             for (grid_entity, fo_unchanged) in large_grids.drain() {
-                let Ok((_, _, _, Some(children))) = shared_grids.get(grid_entity) else {
+                let Ok((_, _, _, list)) = shared_grids.get(grid_entity) else {
                     continue;
                 };
+                let children = list.entities();
                 let chunk_size = (children.len() / n_threads / 10).max(1);
                 for child_chunk in children.chunks(chunk_size) {
                     let mut chunk_sender = tx.clone();
@@ -262,11 +318,27 @@ impl Grid {
         }
     }
 
+    /// Below one channel chunk, fanning out buys no parallelism and makes the frame wait on every
+    /// worker thread being scheduled.
+    #[cfg(feature = "std")]
+    pub(crate) const INLINE_PROPAGATION_MAX: usize = 4096;
+
     /// Marks entities with [`LowPrecisionRoot`]. Handles adding and removing the component.
+    ///
+    /// Children of a [`GridLocalOnly`] entity are not roots: the parent GT they would inherit is
+    /// not maintained.
     pub fn tag_low_precision_roots(
         mut stats: Option<ResMut<crate::timing::PropagationStats>>,
         mut commands: Commands,
-        valid_parent: Query<(), (With<CellCoord>, With<GlobalTransform>, With<Children>)>,
+        valid_parent: Query<
+            (),
+            (
+                With<CellCoord>,
+                With<GlobalTransform>,
+                With<Children>,
+                Without<GridLocalOnly>,
+            ),
+        >,
         unmarked: Query<
             (Entity, &ChildOf),
             (
