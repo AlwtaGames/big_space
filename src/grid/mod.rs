@@ -7,9 +7,11 @@ use bevy_math::{prelude::*, Affine3A, DAffine3, DVec3};
 use bevy_reflect::prelude::*;
 use bevy_transform::prelude::*;
 
+use local_only::PropagatedChildren;
 use local_origin::LocalFloatingOrigin;
 
 pub mod cell;
+pub mod local_only;
 pub mod local_origin;
 pub mod propagation;
 
@@ -30,6 +32,7 @@ pub mod propagation;
 #[reflect(Component)]
 // We do not require the Transform, GlobalTransform, or GridCell, because these are not required in
 // all cases: e.g. BigSpace should not have a Transform or GridCell.
+#[require(PropagatedChildren)]
 pub struct Grid {
     /// The high-precision position of the floating origin's current grid cell local to this grid.
     local_floating_origin: LocalFloatingOrigin,

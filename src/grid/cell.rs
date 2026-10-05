@@ -1,5 +1,6 @@
 //! Contains the grid cell implementation
 
+use super::local_only::{self, PropagationSlot};
 use crate::prelude::*;
 use bevy_ecs::prelude::*;
 use bevy_math::{DVec3, IVec3};
@@ -24,7 +25,8 @@ use bevy_transform::prelude::*;
 /// small.
 #[derive(Component, Default, Debug, PartialEq, Eq, Clone, Copy, Hash, Reflect)]
 #[reflect(Component, Default, PartialEq)]
-#[require(Transform, GlobalTransform)]
+#[require(Transform, GlobalTransform, PropagationSlot)]
+#[component(on_insert = local_only::list_on_insert, on_discard = local_only::unlist_on_discard)]
 pub struct CellCoord {
     /// X coordinate of a cell in its parent [`Grid`].
     pub x: GridPrecision,

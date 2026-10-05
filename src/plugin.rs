@@ -123,6 +123,9 @@ impl Plugin for BigSpaceCorePlugin {
             .register_type::<Grid>()
             .register_type::<BigSpace>()
             .register_type::<FloatingOrigin>()
+            .register_type::<GridLocalOnly>()
+            .add_observer(grid::local_only::list_on_child_of_insert)
+            .add_observer(grid::local_only::unlist_on_child_of_discard)
             .add_systems(
                 PostUpdate,
                 CellCoord::recenter_large_transforms

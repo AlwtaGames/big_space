@@ -238,6 +238,7 @@ pub mod prelude {
     pub use floating_origins::{BigSpace, FloatingOrigin};
     pub use grid::{
         cell::CellCoord,
+        local_only::{GridLocalOnly, PropagatedChildren},
         local_origin::{Grids, GridsMut, LocalFloatingOrigin},
         Grid,
     };
