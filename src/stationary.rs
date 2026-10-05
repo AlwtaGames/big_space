@@ -109,10 +109,12 @@ pub(crate) fn mark_dirty_subtrees(
     system_ticks: SystemChangeTick,
     parents: Query<&ChildOf>,
     mut dirty_ticks: Query<&mut GridDirtyTick>,
+    // A `GridLocalOnly` entity has no GT to recompute, so its changes leave the subtree clean.
     changed: Query<
         &ChildOf,
         (
             Without<Stationary>,
+            Without<GridLocalOnly>,
             Or<(Changed<Transform>, Changed<CellCoord>, Changed<ChildOf>)>,
         ),
     >,
