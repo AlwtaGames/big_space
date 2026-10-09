@@ -514,7 +514,7 @@ impl Grid {
         let Some(children) = children else { return };
         for (child, child_of) in parent_query
             .iter_many(children)
-            .map(|result| result.expect("iter_many yields live children"))
+            .matched()
         {
             assert_eq!(
                 child_of.parent(), entity,

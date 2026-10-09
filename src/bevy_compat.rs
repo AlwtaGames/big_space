@@ -33,7 +33,7 @@ pub fn propagate_parent_transforms(
 
             for (child, child_of) in child_query
                 .iter_many(children)
-                .map(|result| result.expect("iter_many yields live children"))
+                .matched()
             {
                 assert_eq!(
                     child_of.parent(), entity,
@@ -136,7 +136,7 @@ unsafe fn propagate_recursive(
     let Some(children) = children else { return };
     for (child, child_of) in child_query
         .iter_many(children)
-        .map(|result| result.expect("iter_many yields live children"))
+        .matched()
     {
         assert_eq!(
             child_of.parent(), entity,
@@ -156,5 +156,23 @@ unsafe fn propagate_recursive(
                 changed || child_of.is_changed(),
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy_app::prelude::*;
+
+    /// A child the propagation query does not match is skipped, as Bevy's own propagation does.
+    #[test]
+    fn a_child_outside_the_query_is_skipped() {
+        let mut app = App::new();
+        app.add_systems(Update, propagate_parent_transforms);
+        let root = app.world_mut().spawn(Transform::from_xyz(1.0, 0.0, 0.0)).id();
+        app.world_mut().spawn(ChildOf(root));
+        app.update();
+        let global = app.world().get::<GlobalTransform>(root).unwrap();
+        assert_eq!(global.translation().x, 1.0);
     }
 }
